@@ -12,17 +12,23 @@ import telemetryExtension, {
 	buildTurnUsageRecord,
 	CONFIG_PATH,
 	DEFAULT_LOG_PATH,
+	DEFAULT_WEBHOOK_TIMEOUT_MS,
 	extractAssistantUsage,
 	handleTurnEnd,
 	loadTelemetryConfig,
 	type TelemetryConfig,
 	type TelemetrySink,
+	WebhookTelemetrySink,
 	writeJsonl,
 } from "./extensions/telemetry-minimal.ts";
 
 const tempDirs: string[] = [];
+const servers: Array<{ stop(force?: boolean): void }> = [];
 
 afterEach(async () => {
+	for (const server of servers.splice(0)) {
+		server.stop(true);
+	}
 	for (const dir of tempDirs.splice(0)) {
 		await rm(dir, { force: true, recursive: true });
 	}
@@ -63,9 +69,20 @@ function assistant(
 	};
 }
 
+function turnEvent(overrides: Partial<TurnEndEvent> = {}): TurnEndEvent {
+	return {
+		type: "turn_end",
+		turnIndex: 1,
+		message: assistant(),
+		toolResults: [],
+		...overrides,
+	};
+}
+
 function context(cwd: string): ExtensionContext {
 	return {
 		cwd,
+		hasUI: false,
 		sessionManager: {
 			getSessionId: () => "session-1",
 			getSessionFile: () => "/tmp/session.jsonl",
@@ -76,12 +93,37 @@ function context(cwd: string): ExtensionContext {
 function config(overrides: Partial<TelemetryConfig> = {}): TelemetryConfig {
 	return {
 		enabled: true,
-		logPath: DEFAULT_LOG_PATH,
-		collectGit: true,
+		labels: {},
+		sinks: {
+			local: { path: DEFAULT_LOG_PATH },
+		},
+		git: { enabled: true, timeoutMs: 750 },
 		warnOnError: true,
-		gitTimeoutMs: 750,
+		warnings: [],
 		...overrides,
 	};
+}
+
+function record() {
+	const built = buildTurnUsageRecord({
+		event: turnEvent(),
+		ctx: context("/work/acme/widget"),
+		config: config(),
+		git: {},
+	});
+	if (!built) throw new Error("expected record");
+	return built;
+}
+
+function startWebhookServer(
+	handler: (request: Request) => Response | Promise<Response>,
+) {
+	const server = Bun.serve({
+		port: 0,
+		fetch: handler,
+	});
+	servers.push(server);
+	return `http://127.0.0.1:${server.port}/telemetry`;
 }
 
 describe("pi-telemetry-minimal extension", () => {
@@ -127,25 +169,36 @@ describe("configuration", () => {
 
 		expect(CONFIG_PATH).toEndWith("/.pi/telemetry-minimal.json");
 		expect(cfg.enabled).toBe(true);
-		expect(cfg.logPath).toBe(DEFAULT_LOG_PATH);
-		expect(cfg.collectGit).toBe(true);
+		expect(cfg.sinks.local.path).toBe(DEFAULT_LOG_PATH);
+		expect(cfg.sinks.webhook).toBeUndefined();
+		expect(cfg.git.enabled).toBe(true);
+		expect(cfg.git.timeoutMs).toBe(750);
 		expect(cfg.warnOnError).toBe(true);
+		expect(cfg.warnings).toEqual([]);
 	});
 
-	test("uses config file with env overrides", async () => {
+	test("uses nested config file with env overrides", async () => {
 		const dir = await tempDir();
 		const configPath = join(dir, "config.json");
 		await Bun.write(
 			configPath,
 			JSON.stringify({
 				enabled: false,
-				logPath: "/from-config.jsonl",
-				team: "platform",
-				project: "agent",
-				developer: "config-dev",
-				collectGit: false,
+				labels: {
+					team: "platform",
+					project: "agent",
+					developer: "config-dev",
+				},
+				sinks: {
+					local: { path: "/from-config.jsonl" },
+					webhook: {
+						url: "https://example.com/config-hook",
+						token: "config-token",
+						timeoutMs: 123,
+					},
+				},
+				git: { enabled: false, timeoutMs: 456 },
 				warnOnError: false,
-				gitTimeoutMs: 123,
 			}),
 		);
 
@@ -158,19 +211,101 @@ describe("configuration", () => {
 				PI_TELEMETRY_PROJECT: "pi",
 				PI_TELEMETRY_DEVELOPER: "env-dev",
 				PI_TELEMETRY_GIT: "true",
+				PI_TELEMETRY_GIT_TIMEOUT_MS: "789",
 				PI_TELEMETRY_WARN_ON_ERROR: "true",
+				PI_TELEMETRY_WEBHOOK_URL: "http://localhost/env-hook",
+				PI_TELEMETRY_WEBHOOK_TOKEN: "env-token",
+				PI_TELEMETRY_WEBHOOK_TIMEOUT_MS: "234",
 			},
 		});
 
 		expect(cfg).toMatchObject({
 			enabled: true,
-			logPath: "/from-env.jsonl",
-			team: "infra",
-			project: "pi",
-			developer: "env-dev",
-			collectGit: true,
+			labels: {
+				team: "infra",
+				project: "pi",
+				developer: "env-dev",
+			},
+			sinks: {
+				local: { path: "/from-env.jsonl" },
+				webhook: {
+					url: "http://localhost/env-hook",
+					token: "env-token",
+					timeoutMs: 234,
+				},
+			},
+			git: { enabled: true, timeoutMs: 789 },
 			warnOnError: true,
-			gitTimeoutMs: 123,
+			warnings: [],
+		});
+	});
+
+	test("breaks old flat file config while preserving env compatibility", async () => {
+		const dir = await tempDir();
+		const configPath = join(dir, "config.json");
+		await Bun.write(
+			configPath,
+			JSON.stringify({
+				logPath: "/old-file.jsonl",
+				team: "old-team",
+				project: "old-project",
+				developer: "old-dev",
+				collectGit: false,
+				gitTimeoutMs: 123,
+			}),
+		);
+
+		const cfg = loadTelemetryConfig({
+			configPath,
+			env: {
+				PI_TELEMETRY_LOG_PATH: "/from-env.jsonl",
+				PI_TELEMETRY_TEAM: "env-team",
+				PI_TELEMETRY_GIT: "false",
+			},
+		});
+
+		expect(cfg.sinks.local.path).toBe("/from-env.jsonl");
+		expect(cfg.labels).toEqual({ team: "env-team" });
+		expect(cfg.git.enabled).toBe(false);
+		expect(cfg.git.timeoutMs).toBe(750);
+	});
+
+	test("skips invalid webhook config with warnings", async () => {
+		const dir = await tempDir();
+		const configPath = join(dir, "config.json");
+		await Bun.write(
+			configPath,
+			JSON.stringify({
+				sinks: {
+					webhook: { url: "file:///tmp/events", timeoutMs: 100 },
+				},
+			}),
+		);
+
+		const invalidUrl = loadTelemetryConfig({ configPath, env: {} });
+		expect(invalidUrl.sinks.webhook).toBeUndefined();
+		expect(invalidUrl.warnings.join("\n")).toContain("webhook URL");
+
+		const invalidTimeout = loadTelemetryConfig({
+			configPath: "/tmp/does-not-exist-pi-telemetry-minimal.json",
+			env: {
+				PI_TELEMETRY_WEBHOOK_URL: "https://example.com/hook",
+				PI_TELEMETRY_WEBHOOK_TIMEOUT_MS: "nope",
+			},
+		});
+		expect(invalidTimeout.sinks.webhook).toBeUndefined();
+		expect(invalidTimeout.warnings.join("\n")).toContain("webhook timeout");
+	});
+
+	test("defaults webhook timeout when url is configured", () => {
+		const cfg = loadTelemetryConfig({
+			configPath: "/tmp/does-not-exist-pi-telemetry-minimal.json",
+			env: { PI_TELEMETRY_WEBHOOK_URL: "https://example.com/hook" },
+		});
+
+		expect(cfg.sinks.webhook).toMatchObject({
+			url: "https://example.com/hook",
+			timeoutMs: DEFAULT_WEBHOOK_TIMEOUT_MS,
 		});
 	});
 });
@@ -184,14 +319,9 @@ describe("usage records", () => {
 
 	test("builds a versioned turn_usage record without content", () => {
 		const record = buildTurnUsageRecord({
-			event: {
-				type: "turn_end",
-				turnIndex: 2,
-				message: assistant(),
-				toolResults: [],
-			} satisfies TurnEndEvent,
+			event: turnEvent({ turnIndex: 2 }),
 			ctx: context("/work/acme/widget"),
-			config: config({ team: "platform" }),
+			config: config({ labels: { team: "platform" } }),
 			git: {
 				root: "/work/acme/widget",
 				remote: "git@github.com:acme/widget.git",
@@ -240,12 +370,7 @@ describe("usage records", () => {
 		const dir = await tempDir();
 		const logPath = join(dir, "nested", "events.jsonl");
 		const record = buildTurnUsageRecord({
-			event: {
-				type: "turn_end",
-				turnIndex: 1,
-				message: assistant(),
-				toolResults: [],
-			} satisfies TurnEndEvent,
+			event: turnEvent(),
 			ctx: context(dir),
 			config: config(),
 			git: {},
@@ -264,25 +389,78 @@ describe("usage records", () => {
 	});
 });
 
+describe("webhook sink", () => {
+	test("posts the exact record with JSON, bearer auth, and user agent", async () => {
+		let seen: { body: unknown; headers: Headers } | undefined;
+		const url = startWebhookServer(async (request) => {
+			seen = {
+				body: await request.json(),
+				headers: request.headers,
+			};
+			return new Response(null, { status: 202 });
+		});
+		const usageRecord = record();
+
+		await new WebhookTelemetrySink({
+			url,
+			token: "secret-token",
+			timeoutMs: 1000,
+		}).write(usageRecord);
+
+		expect(seen?.body).toEqual(usageRecord);
+		expect(seen?.headers.get("authorization")).toBe("Bearer secret-token");
+		expect(seen?.headers.get("content-type")).toContain("application/json");
+		expect(seen?.headers.get("user-agent")).toContain("pi-telemetry-minimal");
+	});
+
+	test("does not require a webhook token", async () => {
+		let authorization: string | null = "not-called";
+		const url = startWebhookServer((request) => {
+			authorization = request.headers.get("authorization");
+			return new Response(null, { status: 204 });
+		});
+
+		await new WebhookTelemetrySink({ url, timeoutMs: 1000 }).write(record());
+
+		expect(authorization).toBeNull();
+	});
+
+	test("treats non-2xx responses as failures without reading the body", async () => {
+		const url = startWebhookServer(
+			() => new Response("backend secret", { status: 500 }),
+		);
+
+		await expect(
+			new WebhookTelemetrySink({ url, timeoutMs: 1000 }).write(record()),
+		).rejects.toThrow("HTTP 500");
+	});
+
+	test("times out slow webhook requests", async () => {
+		const url = startWebhookServer(
+			() => new Promise<Response>(() => undefined),
+		);
+
+		await expect(
+			new WebhookTelemetrySink({ url, timeoutMs: 1 }).write(record()),
+		).rejects.toThrow("timed out");
+	});
+});
+
 describe("turn handler", () => {
 	test("does not write when disabled", async () => {
 		let writes = 0;
 		const sink: TelemetrySink = {
+			name: "test",
 			async write() {
 				writes++;
 			},
 		};
 
 		await handleTurnEnd({
-			event: {
-				type: "turn_end",
-				turnIndex: 1,
-				message: assistant(),
-				toolResults: [],
-			} satisfies TurnEndEvent,
+			event: turnEvent(),
 			ctx: context("/tmp/project"),
 			config: config({ enabled: false }),
-			sink,
+			sinks: [sink],
 			collectGit: async () => ({}),
 			warn: () => {},
 		});
@@ -293,6 +471,7 @@ describe("turn handler", () => {
 	test("never throws when git collection or writing fails", async () => {
 		const warnings: string[] = [];
 		const sink: TelemetrySink = {
+			name: "local",
 			async write() {
 				throw new Error("disk full");
 			},
@@ -300,15 +479,10 @@ describe("turn handler", () => {
 
 		await expect(
 			handleTurnEnd({
-				event: {
-					type: "turn_end",
-					turnIndex: 1,
-					message: assistant(),
-					toolResults: [],
-				} satisfies TurnEndEvent,
+				event: turnEvent(),
 				ctx: context("/tmp/project"),
 				config: config(),
-				sink,
+				sinks: [sink],
 				collectGit: async () => {
 					throw new Error("not a git repo");
 				},
@@ -316,5 +490,39 @@ describe("turn handler", () => {
 			}),
 		).resolves.toBeUndefined();
 		expect(warnings.join("\n")).toContain("Telemetry");
+		expect(warnings.join("\n")).toContain("local");
+	});
+
+	test("attempts each sink independently", async () => {
+		const writes: string[] = [];
+		const warnings: string[] = [];
+		const failing: TelemetrySink = {
+			name: "webhook",
+			async write() {
+				writes.push("webhook");
+				throw new Error("HTTP 500");
+			},
+		};
+		const succeeding: TelemetrySink = {
+			name: "local",
+			async write() {
+				writes.push("local");
+			},
+		};
+
+		await handleTurnEnd({
+			event: turnEvent(),
+			ctx: context("/tmp/project"),
+			config: config({ git: { enabled: false, timeoutMs: 750 } }),
+			sinks: [failing, succeeding],
+			collectGit: async () => {
+				throw new Error("should not collect git");
+			},
+			warn: (message) => warnings.push(message),
+		});
+
+		expect(writes.sort()).toEqual(["local", "webhook"]);
+		expect(warnings.join("\n")).toContain("webhook");
+		expect(warnings.join("\n")).toContain("HTTP 500");
 	});
 });

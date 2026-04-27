@@ -17,29 +17,66 @@ export const DEFAULT_LOG_PATH = join(
 	"telemetry-minimal",
 	"events.jsonl",
 );
+export const DEFAULT_WEBHOOK_TIMEOUT_MS = 2000;
 
 const DEFAULT_GIT_TIMEOUT_MS = 750;
+const WEBHOOK_USER_AGENT = "pi-telemetry-minimal/0.2.0";
 
 export interface TelemetryConfig {
 	enabled: boolean;
-	logPath: string;
-	team?: string;
-	project?: string;
-	developer?: string;
-	collectGit: boolean;
+	labels: {
+		team?: string;
+		project?: string;
+		developer?: string;
+	};
+	sinks: {
+		local: { path: string };
+		webhook?: {
+			url: string;
+			token?: string;
+			timeoutMs: number;
+		};
+	};
+	git: {
+		enabled: boolean;
+		timeoutMs: number;
+	};
 	warnOnError: boolean;
-	gitTimeoutMs: number;
+	warnings: string[];
 }
 
 interface RawTelemetryConfig {
 	enabled?: unknown;
-	logPath?: unknown;
+	labels?: unknown;
+	sinks?: unknown;
+	git?: unknown;
+	warnOnError?: unknown;
+}
+
+interface RawLabelsConfig {
 	team?: unknown;
 	project?: unknown;
 	developer?: unknown;
-	collectGit?: unknown;
-	warnOnError?: unknown;
-	gitTimeoutMs?: unknown;
+}
+
+interface RawSinksConfig {
+	local?: unknown;
+	webhook?: unknown;
+}
+
+interface RawLocalConfig {
+	path?: unknown;
+}
+
+interface RawWebhookConfig {
+	url?: unknown;
+	token?: unknown;
+	timeoutMs?: unknown;
+}
+
+interface RawGitConfig {
+	enabled?: unknown;
+	timeoutMs?: unknown;
 }
 
 export interface GitMetadata {
@@ -84,14 +121,65 @@ export interface TurnUsageRecord {
 }
 
 export interface TelemetrySink {
+	name: string;
 	write(record: TurnUsageRecord): Promise<void>;
 }
 
 export class JsonlTelemetrySink implements TelemetrySink {
+	readonly name = "local";
+
 	constructor(private readonly logPath: string) {}
 
 	async write(record: TurnUsageRecord): Promise<void> {
 		await writeJsonl(this.logPath, record);
+	}
+}
+
+export class WebhookTelemetrySink implements TelemetrySink {
+	readonly name = "webhook";
+
+	constructor(
+		private readonly options: {
+			url: string;
+			token?: string;
+			timeoutMs: number;
+			fetch?: typeof fetch;
+		},
+	) {}
+
+	async write(record: TurnUsageRecord): Promise<void> {
+		const signal = AbortSignal.timeout(this.options.timeoutMs);
+		const headers: {
+			"Content-Type": string;
+			"User-Agent": string;
+			Authorization?: string;
+		} = {
+			"Content-Type": "application/json",
+			"User-Agent": WEBHOOK_USER_AGENT,
+		};
+		if (this.options.token) {
+			headers.Authorization = `Bearer ${this.options.token}`;
+		}
+
+		let response: Response;
+		try {
+			response = await (this.options.fetch ?? fetch)(this.options.url, {
+				method: "POST",
+				headers,
+				body: JSON.stringify(record),
+				signal,
+			});
+		} catch (error) {
+			if (signal.aborted) {
+				throw new Error(`request timed out after ${this.options.timeoutMs}ms`);
+			}
+			const message = error instanceof Error ? error.message : String(error);
+			throw new Error(message);
+		}
+
+		if (response.status < 200 || response.status > 299) {
+			throw new Error(`HTTP ${response.status}`);
+		}
 	}
 }
 
@@ -104,6 +192,9 @@ interface Env {
 	PI_TELEMETRY_GIT?: string;
 	PI_TELEMETRY_WARN_ON_ERROR?: string;
 	PI_TELEMETRY_GIT_TIMEOUT_MS?: string;
+	PI_TELEMETRY_WEBHOOK_URL?: string;
+	PI_TELEMETRY_WEBHOOK_TOKEN?: string;
+	PI_TELEMETRY_WEBHOOK_TIMEOUT_MS?: string;
 }
 
 type WarningSink = (message: string, ctx: ExtensionContext) => void;
@@ -118,6 +209,12 @@ function expandHome(path: string): string {
 	if (path === "~") return homedir();
 	if (path.startsWith("~/")) return join(homedir(), path.slice(2));
 	return path;
+}
+
+function recordObject<T extends object>(value: unknown): T {
+	if (!value || typeof value !== "object" || Array.isArray(value))
+		return {} as T;
+	return value as T;
 }
 
 function parseBoolean(value: unknown): boolean | undefined {
@@ -148,39 +245,100 @@ function readConfigFile(configPath: string): RawTelemetryConfig {
 	}
 }
 
+function parseWebhookUrl(value: unknown): string | undefined {
+	const cleaned = cleanString(value);
+	if (!cleaned) return undefined;
+	try {
+		const url = new URL(cleaned);
+		if (url.protocol !== "http:" && url.protocol !== "https:") return undefined;
+		return url.toString();
+	} catch {
+		return undefined;
+	}
+}
+
 export function loadTelemetryConfig(options?: {
 	env?: Env;
 	configPath?: string;
 }): TelemetryConfig {
 	const env = options?.env ?? (process.env as Env);
 	const raw = readConfigFile(options?.configPath ?? CONFIG_PATH);
+	const rawLabels = recordObject<RawLabelsConfig>(raw.labels);
+	const rawSinks = recordObject<RawSinksConfig>(raw.sinks);
+	const rawLocal = recordObject<RawLocalConfig>(rawSinks.local);
+	const rawWebhook = recordObject<RawWebhookConfig>(rawSinks.webhook);
+	const rawGit = recordObject<RawGitConfig>(raw.git);
+	const warnings: string[] = [];
+
+	const webhookUrlRaw = env.PI_TELEMETRY_WEBHOOK_URL ?? rawWebhook.url;
+	const webhookUrl = parseWebhookUrl(webhookUrlRaw);
+	const webhookToken =
+		cleanString(env.PI_TELEMETRY_WEBHOOK_TOKEN) ??
+		cleanString(rawWebhook.token);
+	const webhookTimeoutRaw =
+		env.PI_TELEMETRY_WEBHOOK_TIMEOUT_MS ?? rawWebhook.timeoutMs;
+	const webhookTimeout = parsePositiveNumber(webhookTimeoutRaw);
+	let webhook: TelemetryConfig["sinks"]["webhook"];
+
+	if (cleanString(webhookUrlRaw)) {
+		if (!webhookUrl) {
+			warnings.push(
+				"Telemetry webhook URL must use http or https; skipping webhook sink",
+			);
+		} else if (
+			webhookTimeoutRaw !== undefined &&
+			webhookTimeout === undefined
+		) {
+			warnings.push(
+				"Telemetry webhook timeout must be a positive number; skipping webhook sink",
+			);
+		} else {
+			webhook = {
+				url: webhookUrl,
+				token: webhookToken,
+				timeoutMs: webhookTimeout ?? DEFAULT_WEBHOOK_TIMEOUT_MS,
+			};
+		}
+	}
 
 	return {
 		enabled:
 			parseBoolean(env.PI_TELEMETRY_ENABLED) ??
 			parseBoolean(raw.enabled) ??
 			true,
-		logPath: expandHome(
-			cleanString(env.PI_TELEMETRY_LOG_PATH) ??
-				cleanString(raw.logPath) ??
-				DEFAULT_LOG_PATH,
-		),
-		team: cleanString(env.PI_TELEMETRY_TEAM) ?? cleanString(raw.team),
-		project: cleanString(env.PI_TELEMETRY_PROJECT) ?? cleanString(raw.project),
-		developer:
-			cleanString(env.PI_TELEMETRY_DEVELOPER) ?? cleanString(raw.developer),
-		collectGit:
-			parseBoolean(env.PI_TELEMETRY_GIT) ??
-			parseBoolean(raw.collectGit) ??
-			true,
+		labels: {
+			team: cleanString(env.PI_TELEMETRY_TEAM) ?? cleanString(rawLabels.team),
+			project:
+				cleanString(env.PI_TELEMETRY_PROJECT) ?? cleanString(rawLabels.project),
+			developer:
+				cleanString(env.PI_TELEMETRY_DEVELOPER) ??
+				cleanString(rawLabels.developer),
+		},
+		sinks: {
+			local: {
+				path: expandHome(
+					cleanString(env.PI_TELEMETRY_LOG_PATH) ??
+						cleanString(rawLocal.path) ??
+						DEFAULT_LOG_PATH,
+				),
+			},
+			webhook,
+		},
+		git: {
+			enabled:
+				parseBoolean(env.PI_TELEMETRY_GIT) ??
+				parseBoolean(rawGit.enabled) ??
+				true,
+			timeoutMs:
+				parsePositiveNumber(env.PI_TELEMETRY_GIT_TIMEOUT_MS) ??
+				parsePositiveNumber(rawGit.timeoutMs) ??
+				DEFAULT_GIT_TIMEOUT_MS,
+		},
 		warnOnError:
 			parseBoolean(env.PI_TELEMETRY_WARN_ON_ERROR) ??
 			parseBoolean(raw.warnOnError) ??
 			true,
-		gitTimeoutMs:
-			parsePositiveNumber(env.PI_TELEMETRY_GIT_TIMEOUT_MS) ??
-			parsePositiveNumber(raw.gitTimeoutMs) ??
-			DEFAULT_GIT_TIMEOUT_MS,
+		warnings,
 	};
 }
 
@@ -220,11 +378,13 @@ function assistantMessage(message: unknown): AssistantMessage | null {
 }
 
 function projectFrom(cwd: string, git: GitMetadata, config: TelemetryConfig) {
-	return config.project ?? (git.root ? basename(git.root) : basename(cwd));
+	return (
+		config.labels.project ?? (git.root ? basename(git.root) : basename(cwd))
+	);
 }
 
 function developerFrom(git: GitMetadata, config: TelemetryConfig) {
-	return config.developer ?? git.userEmail ?? git.userName;
+	return config.labels.developer ?? git.userEmail ?? git.userName;
 }
 
 export function buildTurnUsageRecord(input: {
@@ -253,11 +413,11 @@ export function buildTurnUsageRecord(input: {
 			model: message.model,
 		},
 		labels: {
-			team: input.config.team,
+			team: input.config.labels.team,
 			project: projectFrom(input.ctx.cwd, input.git, input.config),
 			developer: developerFrom(input.git, input.config),
 		},
-		git: input.config.collectGit ? input.git : undefined,
+		git: input.config.git.enabled ? input.git : undefined,
 		usage: {
 			input: message.usage.input,
 			output: message.usage.output,
@@ -316,20 +476,30 @@ export async function collectGitMetadata(
 	return { root, remote, branch, commit, userName, userEmail };
 }
 
+export function createTelemetrySinks(config: TelemetryConfig): TelemetrySink[] {
+	const sinks: TelemetrySink[] = [
+		new JsonlTelemetrySink(config.sinks.local.path),
+	];
+	if (config.sinks.webhook) {
+		sinks.push(new WebhookTelemetrySink(config.sinks.webhook));
+	}
+	return sinks;
+}
+
 export async function handleTurnEnd(input: {
 	event: TurnEndEvent;
 	ctx: ExtensionContext;
 	config: TelemetryConfig;
-	sink: TelemetrySink;
+	sinks: TelemetrySink[];
 	collectGit: (cwd: string, timeoutMs: number) => Promise<GitMetadata>;
 	warn: WarningSink;
 }): Promise<void> {
 	if (!input.config.enabled) return;
 
 	let git: GitMetadata = {};
-	if (input.config.collectGit) {
+	if (input.config.git.enabled) {
 		try {
-			git = await input.collectGit(input.ctx.cwd, input.config.gitTimeoutMs);
+			git = await input.collectGit(input.ctx.cwd, input.config.git.timeoutMs);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			input.warn(`Telemetry git metadata failed: ${message}`, input.ctx);
@@ -344,12 +514,19 @@ export async function handleTurnEnd(input: {
 	});
 	if (!record) return;
 
-	try {
-		await input.sink.write(record);
-	} catch (error) {
-		const message = error instanceof Error ? error.message : String(error);
-		input.warn(`Telemetry write failed: ${message}`, input.ctx);
-	}
+	await Promise.all(
+		input.sinks.map(async (sink) => {
+			try {
+				await sink.write(record);
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				input.warn(
+					`Telemetry ${sink.name} write failed: ${message}`,
+					input.ctx,
+				);
+			}
+		}),
+	);
 }
 
 let warningShown = false;
@@ -379,11 +556,14 @@ export default function telemetryMinimalExtension(pi: ExtensionAPI) {
 			return;
 		}
 		const warn = config.warnOnError ? warnOnce : () => {};
+		for (const warning of config.warnings) {
+			warn(warning, ctx);
+		}
 		await handleTurnEnd({
 			event,
 			ctx,
 			config,
-			sink: new JsonlTelemetrySink(config.logPath),
+			sinks: createTelemetrySinks(config),
 			collectGit: collectGitMetadata,
 			warn,
 		});
