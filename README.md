@@ -2,7 +2,9 @@
 
 Passive Pi token telemetry: one finalized assistant turn in, one usage record out.
 
-Writes local JSONL by default. Optionally POSTs the same record to your org webhook. It never records prompts, responses, tool output, command text, file contents, or code snippets.
+Writes local JSONL by default. The prescribed way to consume the stream is [`pi-telemetry-web`](https://github.com/drsh4dow/pi-telemetry-web), a self-hosted SQLite dashboard that receives this package's webhook payload. You can still POST the same record to any compatible org webhook.
+
+It never records prompts, responses, tool output, command text, file contents, or code snippets.
 
 ## Install
 
@@ -38,9 +40,34 @@ Webhook sink, when configured:
 - 2000ms timeout by default
 - best effort only: no retries, no queue, never blocks Pi
 
+## Consume with pi-telemetry-web
+
+Run [`pi-telemetry-web`](https://github.com/drsh4dow/pi-telemetry-web), create the first admin user, then copy the generated webhook URL and bearer token from its Settings page into `~/.pi/telemetry-minimal.json`:
+
+```json
+{
+ "sinks": {
+  "local": { "path": "~/.pi/telemetry-minimal/events.jsonl" },
+  "webhook": {
+   "url": "https://telemetry.example.com/api/telemetry/events",
+   "token": "pi-telemetry-web-ingest-token",
+   "timeoutMs": 2000
+  }
+ }
+}
+```
+
+Existing local history can be imported in the dashboard by uploading:
+
+```text
+~/.pi/telemetry-minimal/events.jsonl
+```
+
+Keep the local sink enabled unless you intentionally want webhook-only telemetry.
+
 ## Configure
 
-Use `~/.pi/telemetry-minimal.json`:
+Full config example:
 
 ```json
 {
@@ -53,8 +80,8 @@ Use `~/.pi/telemetry-minimal.json`:
  "sinks": {
   "local": { "path": "~/.pi/telemetry-minimal/events.jsonl" },
   "webhook": {
-   "url": "https://telemetry.example.com/pi/events",
-   "token": "optional-bearer-token",
+   "url": "https://telemetry.example.com/api/telemetry/events",
+   "token": "pi-telemetry-web-ingest-token",
    "timeoutMs": 2000
   }
  },
@@ -74,8 +101,8 @@ PI_TELEMETRY_DEVELOPER=dev@example.com
 PI_TELEMETRY_GIT=true
 PI_TELEMETRY_GIT_TIMEOUT_MS=750
 PI_TELEMETRY_WARN_ON_ERROR=true
-PI_TELEMETRY_WEBHOOK_URL=https://telemetry.example.com/pi/events
-PI_TELEMETRY_WEBHOOK_TOKEN=...
+PI_TELEMETRY_WEBHOOK_URL=https://telemetry.example.com/api/telemetry/events
+PI_TELEMETRY_WEBHOOK_TOKEN=pi-telemetry-web-ingest-token
 PI_TELEMETRY_WEBHOOK_TIMEOUT_MS=2000
 ```
 
