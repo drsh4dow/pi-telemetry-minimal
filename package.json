@@ -1,0 +1,57 @@
+{
+	"name": "pi-telemetry-minimal",
+	"version": "0.1.0",
+	"description": "Minimal token usage telemetry for Pi",
+	"type": "module",
+	"exports": "./index.ts",
+	"author": "drsh4dow <daniel.morettiv@gmail.com> (https://github.com/drsh4dow)",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/drsh4dow/pi-telemetry-minimal.git"
+	},
+	"bugs": {
+		"url": "https://github.com/drsh4dow/pi-telemetry-minimal/issues"
+	},
+	"homepage": "https://github.com/drsh4dow/pi-telemetry-minimal#readme",
+	"scripts": {
+		"check": "biome check .",
+		"check:fix": "biome check --write .",
+		"test": "bun test",
+		"typecheck": "bunx tsc --noEmit"
+	},
+	"keywords": [
+		"pi-package",
+		"pi",
+		"telemetry",
+		"token-usage",
+		"minimal",
+		"extension"
+	],
+	"files": [
+		"extensions",
+		"index.ts",
+		"README.md"
+	],
+	"pi": {
+		"extensions": [
+			"./extensions/telemetry-minimal.ts"
+		]
+	},
+	"devDependencies": {
+		"@biomejs/biome": "^2.4.13",
+		"@mariozechner/pi-ai": "0.70.2",
+		"@mariozechner/pi-coding-agent": "0.70.2",
+		"@mariozechner/pi-tui": "0.70.2",
+		"@types/bun": "^1.3.13",
+		"typescript": "^6.0.3"
+	},
+	"peerDependencies": {
+		"@mariozechner/pi-ai": "*",
+		"@mariozechner/pi-coding-agent": "*",
+		"@mariozechner/pi-tui": "*"
+	},
+	"trustedDependencies": [
+		"koffi",
+		"protobufjs"
+	]
+}
