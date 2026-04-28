@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import type { AssistantMessage } from "@mariozechner/pi-ai";
 import type {
 	ExtensionAPI,
@@ -9,13 +9,17 @@ import type {
 	TurnEndEvent,
 } from "@mariozechner/pi-coding-agent";
 import telemetryExtension, {
+	appendDelimitedPath,
 	buildTurnUsageRecord,
+	CHILD_EXTENSION_PATHS_ENV,
 	CONFIG_PATH,
 	DEFAULT_LOG_PATH,
 	DEFAULT_WEBHOOK_TIMEOUT_MS,
 	extractAssistantUsage,
 	handleTurnEnd,
 	loadTelemetryConfig,
+	registerChildExtensionPath,
+	TELEMETRY_EXTENSION_PATH,
 	type TelemetryConfig,
 	type TelemetrySink,
 	WebhookTelemetrySink,
@@ -139,6 +143,20 @@ describe("pi-telemetry-minimal extension", () => {
 		} as unknown as ExtensionAPI);
 
 		expect(events).toEqual(["turn_end"]);
+	});
+
+	test("advertises itself for child Pi resource loaders", () => {
+		const env: Record<string, string | undefined> = {};
+		registerChildExtensionPath(env);
+		registerChildExtensionPath(env);
+
+		expect(env[CHILD_EXTENSION_PATHS_ENV]).toBe(TELEMETRY_EXTENSION_PATH);
+		expect(
+			appendDelimitedPath(
+				`/tmp/other${delimiter}${TELEMETRY_EXTENSION_PATH}`,
+				TELEMETRY_EXTENSION_PATH,
+			),
+		).toBe(`/tmp/other${delimiter}${TELEMETRY_EXTENSION_PATH}`);
 	});
 
 	test("package metadata follows Pi package conventions", async () => {

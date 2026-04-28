@@ -2,7 +2,8 @@ import { execFile } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { appendFile, mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, delimiter, dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { AssistantMessage, StopReason, Usage } from "@mariozechner/pi-ai";
 import type {
 	ExtensionAPI,
@@ -20,7 +21,10 @@ export const DEFAULT_LOG_PATH = join(
 export const DEFAULT_WEBHOOK_TIMEOUT_MS = 2000;
 
 const DEFAULT_GIT_TIMEOUT_MS = 750;
-const WEBHOOK_USER_AGENT = "pi-telemetry-minimal/0.2.2";
+const WEBHOOK_USER_AGENT = "pi-telemetry-minimal/0.2.3";
+
+export const CHILD_EXTENSION_PATHS_ENV = "PI_CHILD_EXTENSION_PATHS";
+export const TELEMETRY_EXTENSION_PATH = fileURLToPath(import.meta.url);
 
 export interface TelemetryConfig {
 	enabled: boolean;
@@ -239,6 +243,27 @@ function parsePositiveNumber(value: unknown): number | undefined {
 	if (typeof value !== "string") return undefined;
 	const parsed = Number(value.trim());
 	return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : undefined;
+}
+
+export function appendDelimitedPath(
+	value: string | undefined,
+	path: string,
+): string {
+	const paths = (value ?? "")
+		.split(delimiter)
+		.map((item) => item.trim())
+		.filter(Boolean);
+	if (!paths.includes(path)) paths.push(path);
+	return paths.join(delimiter);
+}
+
+export function registerChildExtensionPath(
+	env: Record<string, string | undefined> = process.env,
+): void {
+	env[CHILD_EXTENSION_PATHS_ENV] = appendDelimitedPath(
+		env[CHILD_EXTENSION_PATHS_ENV],
+		TELEMETRY_EXTENSION_PATH,
+	);
 }
 
 function readConfigFile(configPath: string): RawTelemetryConfig {
@@ -585,6 +610,8 @@ function warnOnce(message: string, ctx: ExtensionContext): void {
 }
 
 export default function telemetryMinimalExtension(pi: ExtensionAPI) {
+	registerChildExtensionPath();
+
 	pi.on("turn_end", async (event, ctx) => {
 		let config: TelemetryConfig;
 		try {

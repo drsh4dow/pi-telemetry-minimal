@@ -6,6 +6,8 @@ Writes local JSONL by default. The prescribed way to consume the stream is [`pi-
 
 It never records prompts, responses, tool output, command text, file contents, or code snippets.
 
+Subagents are counted when their Pi runtime loads this extension. `pi-delegate` children inherit this extension through `PI_CHILD_EXTENSION_PATHS`, so development runs like `pi --no-extensions -e .` still capture delegated child turns when used with a compatible `pi-delegate` version. `ask_questions` itself does not call an LLM.
+
 ## Install
 
 ```bash
