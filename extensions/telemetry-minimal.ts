@@ -20,7 +20,7 @@ export const DEFAULT_LOG_PATH = join(
 export const DEFAULT_WEBHOOK_TIMEOUT_MS = 2000;
 
 const DEFAULT_GIT_TIMEOUT_MS = 750;
-const WEBHOOK_USER_AGENT = "pi-telemetry-minimal/0.2.0";
+const WEBHOOK_USER_AGENT = "pi-telemetry-minimal/0.2.2";
 
 export interface TelemetryConfig {
 	enabled: boolean;
@@ -519,6 +519,7 @@ export async function handleTurnEnd(input: {
 			try {
 				await sink.write(record);
 			} catch (error) {
+				if (sink.name === "webhook") return;
 				const message = error instanceof Error ? error.message : String(error);
 				input.warn(
 					`Telemetry ${sink.name} write failed: ${message}`,

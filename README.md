@@ -39,6 +39,7 @@ Webhook sink, when configured:
 - optional `Authorization: Bearer <token>`
 - 2000ms timeout by default
 - best effort only: no retries, no queue, never blocks Pi
+- failures are silent, including non-2xx responses and timeouts
 
 ## Consume with pi-telemetry-web
 
@@ -124,7 +125,7 @@ or:
 PI_TELEMETRY_GIT=false
 ```
 
-Failures degrade silently except for one warning when `warnOnError` is enabled.
+Webhook delivery failures are always silent. Other failures degrade silently except for one warning when `warnOnError` is enabled.
 
 ## Development
 

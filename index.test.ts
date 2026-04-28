@@ -493,7 +493,7 @@ describe("turn handler", () => {
 		expect(warnings.join("\n")).toContain("local");
 	});
 
-	test("attempts each sink independently", async () => {
+	test("attempts each sink independently and silences webhook failures", async () => {
 		const writes: string[] = [];
 		const warnings: string[] = [];
 		const failing: TelemetrySink = {
@@ -522,7 +522,6 @@ describe("turn handler", () => {
 		});
 
 		expect(writes.sort()).toEqual(["local", "webhook"]);
-		expect(warnings.join("\n")).toContain("webhook");
-		expect(warnings.join("\n")).toContain("HTTP 500");
+		expect(warnings).toEqual([]);
 	});
 });
