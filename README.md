@@ -18,7 +18,7 @@ Each event is `schemaVersion: 1`, `type: "turn_usage"`.
 
 Captured:
 
-- timestamp, turn index
+- timestamp, turn index, assistant stop reason
 - session id/file, cwd/cwd name
 - model api/provider/name
 - input/output/cache tokens and provider-reported cost
@@ -38,7 +38,7 @@ Webhook sink, when configured:
 - any 2xx is success
 - optional `Authorization: Bearer <token>`
 - 2000ms timeout by default
-- best effort only: no retries, no queue, never blocks Pi
+- best effort only: no retries, no queue, abort-aware
 - failures are silent, including non-2xx responses and timeouts
 
 ## Consume with pi-telemetry-web
@@ -126,6 +126,8 @@ PI_TELEMETRY_GIT=false
 ```
 
 Webhook delivery failures are always silent. Other failures degrade silently except for one warning when `warnOnError` is enabled.
+
+Records include the assistant `stopReason` (`stop`, `length`, `toolUse`, `error`, or `aborted`) so downstream consumers can separate successful, truncated, tool-using, failed, and aborted turns without receiving error text.
 
 ## Development
 

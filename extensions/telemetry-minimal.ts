@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { appendFile, mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import type { AssistantMessage, Usage } from "@mariozechner/pi-ai";
+import type { AssistantMessage, StopReason, Usage } from "@mariozechner/pi-ai";
 import type {
 	ExtensionAPI,
 	ExtensionContext,
@@ -92,7 +92,7 @@ export interface TurnUsageRecord {
 	schemaVersion: 1;
 	type: "turn_usage";
 	timestamp: string;
-	turn: { index: number };
+	turn: { index: number; stopReason: StopReason };
 	session: {
 		id: string;
 		file?: string;
@@ -122,7 +122,7 @@ export interface TurnUsageRecord {
 
 export interface TelemetrySink {
 	name: string;
-	write(record: TurnUsageRecord): Promise<void>;
+	write(record: TurnUsageRecord, signal?: AbortSignal): Promise<void>;
 }
 
 export class JsonlTelemetrySink implements TelemetrySink {
@@ -130,8 +130,8 @@ export class JsonlTelemetrySink implements TelemetrySink {
 
 	constructor(private readonly logPath: string) {}
 
-	async write(record: TurnUsageRecord): Promise<void> {
-		await writeJsonl(this.logPath, record);
+	async write(record: TurnUsageRecord, signal?: AbortSignal): Promise<void> {
+		await writeJsonl(this.logPath, record, signal);
 	}
 }
 
@@ -147,8 +147,11 @@ export class WebhookTelemetrySink implements TelemetrySink {
 		},
 	) {}
 
-	async write(record: TurnUsageRecord): Promise<void> {
-		const signal = AbortSignal.timeout(this.options.timeoutMs);
+	async write(record: TurnUsageRecord, signal?: AbortSignal): Promise<void> {
+		const timeoutSignal = AbortSignal.timeout(this.options.timeoutMs);
+		const requestSignal = signal
+			? AbortSignal.any([signal, timeoutSignal])
+			: timeoutSignal;
 		const headers: {
 			"Content-Type": string;
 			"User-Agent": string;
@@ -167,11 +170,14 @@ export class WebhookTelemetrySink implements TelemetrySink {
 				method: "POST",
 				headers,
 				body: JSON.stringify(record),
-				signal,
+				signal: requestSignal,
 			});
 		} catch (error) {
-			if (signal.aborted) {
+			if (timeoutSignal.aborted) {
 				throw new Error(`request timed out after ${this.options.timeoutMs}ms`);
+			}
+			if (signal?.aborted) {
+				throw new Error("request aborted");
 			}
 			const message = error instanceof Error ? error.message : String(error);
 			throw new Error(message);
@@ -363,6 +369,16 @@ export function extractAssistantUsage(message: unknown): Usage | null {
 	return maybe.usage;
 }
 
+function isStopReason(value: unknown): value is StopReason {
+	return (
+		value === "stop" ||
+		value === "length" ||
+		value === "toolUse" ||
+		value === "error" ||
+		value === "aborted"
+	);
+}
+
 function assistantMessage(message: unknown): AssistantMessage | null {
 	if (!message || typeof message !== "object") return null;
 	const maybe = message as Partial<AssistantMessage>;
@@ -370,7 +386,8 @@ function assistantMessage(message: unknown): AssistantMessage | null {
 	if (
 		typeof maybe.api !== "string" ||
 		typeof maybe.provider !== "string" ||
-		typeof maybe.model !== "string"
+		typeof maybe.model !== "string" ||
+		!isStopReason(maybe.stopReason)
 	) {
 		return null;
 	}
@@ -400,7 +417,10 @@ export function buildTurnUsageRecord(input: {
 		schemaVersion: 1,
 		type: "turn_usage",
 		timestamp: new Date().toISOString(),
-		turn: { index: input.event.turnIndex },
+		turn: {
+			index: input.event.turnIndex,
+			stopReason: message.stopReason,
+		},
 		session: {
 			id: input.ctx.sessionManager.getSessionId(),
 			file: input.ctx.sessionManager.getSessionFile(),
@@ -432,21 +452,28 @@ export function buildTurnUsageRecord(input: {
 export async function writeJsonl(
 	logPath: string,
 	record: TurnUsageRecord,
+	signal?: AbortSignal,
 ): Promise<void> {
+	signal?.throwIfAborted();
 	await mkdir(dirname(logPath), { recursive: true });
-	await appendFile(logPath, `${JSON.stringify(record)}\n`, "utf8");
+	signal?.throwIfAborted();
+	await appendFile(logPath, `${JSON.stringify(record)}\n`, {
+		encoding: "utf8",
+		signal,
+	} as Parameters<typeof appendFile>[2]);
 }
 
 async function gitValue(
 	cwd: string,
 	args: string[],
 	timeoutMs: number,
+	signal?: AbortSignal,
 ): Promise<string | undefined> {
 	return new Promise((resolve) => {
 		execFile(
 			"git",
 			args,
-			{ cwd, timeout: timeoutMs, windowsHide: true },
+			{ cwd, signal, timeout: timeoutMs, windowsHide: true },
 			(error, stdout) => {
 				if (error) {
 					resolve(undefined);
@@ -461,15 +488,16 @@ async function gitValue(
 export async function collectGitMetadata(
 	cwd: string,
 	timeoutMs = DEFAULT_GIT_TIMEOUT_MS,
+	signal?: AbortSignal,
 ): Promise<GitMetadata> {
 	const [root, remote, branch, commit, userName, userEmail] = await Promise.all(
 		[
-			gitValue(cwd, ["rev-parse", "--show-toplevel"], timeoutMs),
-			gitValue(cwd, ["remote", "get-url", "origin"], timeoutMs),
-			gitValue(cwd, ["branch", "--show-current"], timeoutMs),
-			gitValue(cwd, ["rev-parse", "HEAD"], timeoutMs),
-			gitValue(cwd, ["config", "user.name"], timeoutMs),
-			gitValue(cwd, ["config", "user.email"], timeoutMs),
+			gitValue(cwd, ["rev-parse", "--show-toplevel"], timeoutMs, signal),
+			gitValue(cwd, ["remote", "get-url", "origin"], timeoutMs, signal),
+			gitValue(cwd, ["branch", "--show-current"], timeoutMs, signal),
+			gitValue(cwd, ["rev-parse", "HEAD"], timeoutMs, signal),
+			gitValue(cwd, ["config", "user.name"], timeoutMs, signal),
+			gitValue(cwd, ["config", "user.email"], timeoutMs, signal),
 		],
 	);
 
@@ -490,16 +518,26 @@ export async function handleTurnEnd(input: {
 	event: TurnEndEvent;
 	ctx: ExtensionContext;
 	config: TelemetryConfig;
+	signal?: AbortSignal;
 	sinks: TelemetrySink[];
-	collectGit: (cwd: string, timeoutMs: number) => Promise<GitMetadata>;
+	collectGit: (
+		cwd: string,
+		timeoutMs: number,
+		signal?: AbortSignal,
+	) => Promise<GitMetadata>;
 	warn: WarningSink;
 }): Promise<void> {
 	if (!input.config.enabled) return;
 
+	const signal = input.signal?.aborted ? undefined : input.signal;
 	let git: GitMetadata = {};
 	if (input.config.git.enabled) {
 		try {
-			git = await input.collectGit(input.ctx.cwd, input.config.git.timeoutMs);
+			git = await input.collectGit(
+				input.ctx.cwd,
+				input.config.git.timeoutMs,
+				signal,
+			);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			input.warn(`Telemetry git metadata failed: ${message}`, input.ctx);
@@ -517,9 +555,9 @@ export async function handleTurnEnd(input: {
 	await Promise.all(
 		input.sinks.map(async (sink) => {
 			try {
-				await sink.write(record);
+				await sink.write(record, signal);
 			} catch (error) {
-				if (sink.name === "webhook") return;
+				if (signal?.aborted || sink.name === "webhook") return;
 				const message = error instanceof Error ? error.message : String(error);
 				input.warn(
 					`Telemetry ${sink.name} write failed: ${message}`,
@@ -564,6 +602,7 @@ export default function telemetryMinimalExtension(pi: ExtensionAPI) {
 			event,
 			ctx,
 			config,
+			signal: ctx.signal,
 			sinks: createTelemetrySinks(config),
 			collectGit: collectGitMetadata,
 			warn,

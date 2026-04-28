@@ -335,7 +335,7 @@ describe("usage records", () => {
 		expect(record).toMatchObject({
 			schemaVersion: 1,
 			type: "turn_usage",
-			turn: { index: 2 },
+			turn: { index: 2, stopReason: "stop" },
 			session: {
 				id: "session-1",
 				file: "/tmp/session.jsonl",
@@ -364,6 +364,23 @@ describe("usage records", () => {
 			},
 		});
 		expect(JSON.stringify(record)).not.toContain("SECRET RESPONSE");
+	});
+
+	test("records unsuccessful assistant stop reasons without error text", () => {
+		const built = buildTurnUsageRecord({
+			event: turnEvent({
+				message: assistant({
+					errorMessage: "SECRET ERROR",
+					stopReason: "aborted",
+				}),
+			}),
+			ctx: context("/tmp/project"),
+			config: config(),
+			git: {},
+		});
+
+		expect(built?.turn).toEqual({ index: 1, stopReason: "aborted" });
+		expect(JSON.stringify(built)).not.toContain("SECRET ERROR");
 	});
 
 	test("writes append-only JSONL and creates parent directories", async () => {
@@ -444,6 +461,31 @@ describe("webhook sink", () => {
 			new WebhookTelemetrySink({ url, timeoutMs: 1 }).write(record()),
 		).rejects.toThrow("timed out");
 	});
+
+	test("aborts webhook requests with caller signal", async () => {
+		const controller = new AbortController();
+		let requestSignal: AbortSignal | undefined;
+		const fetch = ((_url, init) => {
+			requestSignal = init?.signal as AbortSignal | undefined;
+			return new Promise<Response>((_resolve, reject) => {
+				requestSignal?.addEventListener(
+					"abort",
+					() => reject(new Error("fetch aborted")),
+					{ once: true },
+				);
+				controller.abort();
+			});
+		}) as typeof globalThis.fetch;
+
+		await expect(
+			new WebhookTelemetrySink({
+				url: "https://example.com/hook",
+				timeoutMs: 1000,
+				fetch,
+			}).write(record(), controller.signal),
+		).rejects.toThrow("request aborted");
+		expect(requestSignal?.aborted).toBe(true);
+	});
 });
 
 describe("turn handler", () => {
@@ -491,6 +533,59 @@ describe("turn handler", () => {
 		).resolves.toBeUndefined();
 		expect(warnings.join("\n")).toContain("Telemetry");
 		expect(warnings.join("\n")).toContain("local");
+	});
+
+	test("passes active abort signal to git collection and sinks", async () => {
+		const controller = new AbortController();
+		const seen: AbortSignal[] = [];
+		const sink: TelemetrySink = {
+			name: "local",
+			async write(_record, signal) {
+				if (signal) seen.push(signal);
+			},
+		};
+
+		await handleTurnEnd({
+			event: turnEvent(),
+			ctx: context("/tmp/project"),
+			signal: controller.signal,
+			config: config(),
+			sinks: [sink],
+			collectGit: async (_cwd, _timeoutMs, signal) => {
+				if (signal) seen.push(signal);
+				return {};
+			},
+			warn: () => {},
+		});
+
+		expect(seen).toEqual([controller.signal, controller.signal]);
+	});
+
+	test("does not pass an already-aborted signal to preserve aborted turn records", async () => {
+		const controller = new AbortController();
+		controller.abort();
+		const seen: Array<AbortSignal | undefined> = [];
+		const sink: TelemetrySink = {
+			name: "local",
+			async write(_record, signal) {
+				seen.push(signal);
+			},
+		};
+
+		await handleTurnEnd({
+			event: turnEvent({ message: assistant({ stopReason: "aborted" }) }),
+			ctx: context("/tmp/project"),
+			signal: controller.signal,
+			config: config(),
+			sinks: [sink],
+			collectGit: async (_cwd, _timeoutMs, signal) => {
+				seen.push(signal);
+				return {};
+			},
+			warn: () => {},
+		});
+
+		expect(seen).toEqual([undefined, undefined]);
 	});
 
 	test("attempts each sink independently and silences webhook failures", async () => {
