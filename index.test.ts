@@ -161,15 +161,23 @@ describe("pi-telemetry-minimal extension", () => {
 
 	test("package metadata follows Pi package conventions", async () => {
 		const pkg = (await Bun.file("package.json").json()) as {
-			exports?: string;
+			exports?: Record<string, string>;
 			files?: string[];
 			pi?: { extensions?: string[] };
 			peerDependencies?: Record<string, string>;
 		};
 
-		expect(pkg.exports).toBe("./index.ts");
+		expect(pkg.exports).toEqual({
+			".": "./index.ts",
+			"./contracts/turn-usage-v1.json": "./contracts/turn-usage-v1.json",
+		});
 		expect(pkg.pi?.extensions).toEqual(["./extensions/telemetry-minimal.ts"]);
-		expect(pkg.files).toEqual(["extensions", "index.ts", "README.md"]);
+		expect(pkg.files).toEqual([
+			"contracts",
+			"extensions",
+			"index.ts",
+			"README.md",
+		]);
 		expect(pkg.peerDependencies).toEqual({
 			"@mariozechner/pi-ai": "*",
 			"@mariozechner/pi-coding-agent": "*",
@@ -399,6 +407,53 @@ describe("usage records", () => {
 
 		expect(built?.turn).toEqual({ index: 1, stopReason: "aborted" });
 		expect(JSON.stringify(built)).not.toContain("SECRET ERROR");
+	});
+
+	test("preserves provider-reported totalTokens", () => {
+		const built = buildTurnUsageRecord({
+			event: turnEvent({
+				message: assistant({
+					usage: {
+						...assistant().usage,
+						totalTokens: 125,
+					},
+				}),
+			}),
+			ctx: context("/tmp/project"),
+			config: config(),
+			git: {},
+		});
+
+		expect(built?.usage).toMatchObject({
+			input: 100,
+			output: 25,
+			cacheRead: 10,
+			cacheWrite: 5,
+			totalTokens: 125,
+		});
+	});
+
+	test("ships a golden turn_usage v1 contract fixture", async () => {
+		const fixture = await Bun.file("contracts/turn-usage-v1.json").json();
+
+		expect(fixture).toMatchObject({
+			schemaVersion: 1,
+			type: "turn_usage",
+			turn: { index: 7, stopReason: "aborted" },
+			usage: {
+				input: 100,
+				output: 25,
+				cacheRead: 10,
+				cacheWrite: 5,
+				totalTokens: 125,
+			},
+		});
+		expect(fixture.usage.totalTokens).not.toBe(
+			fixture.usage.input +
+				fixture.usage.output +
+				fixture.usage.cacheRead +
+				fixture.usage.cacheWrite,
+		);
 	});
 
 	test("writes append-only JSONL and creates parent directories", async () => {

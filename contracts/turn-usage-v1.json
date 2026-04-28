@@ -1,0 +1,47 @@
+{
+	"schemaVersion": 1,
+	"type": "turn_usage",
+	"timestamp": "2026-01-02T03:04:05.000Z",
+	"turn": {
+		"index": 7,
+		"stopReason": "aborted"
+	},
+	"session": {
+		"id": "session-1",
+		"file": "/tmp/session.jsonl",
+		"cwd": "/work/acme/widget",
+		"cwdName": "widget"
+	},
+	"model": {
+		"api": "google-generative-ai",
+		"provider": "google",
+		"model": "gemini-2.5-pro"
+	},
+	"labels": {
+		"team": "platform",
+		"project": "widget",
+		"developer": "dev@example.com"
+	},
+	"git": {
+		"root": "/work/acme/widget",
+		"remote": "git@example.com:acme/widget.git",
+		"branch": "main",
+		"commit": "abc123",
+		"userName": "Dev",
+		"userEmail": "dev@example.com"
+	},
+	"usage": {
+		"input": 100,
+		"output": 25,
+		"cacheRead": 10,
+		"cacheWrite": 5,
+		"totalTokens": 125,
+		"cost": {
+			"input": 0.001,
+			"output": 0.002,
+			"cacheRead": 0.0001,
+			"cacheWrite": 0.0002,
+			"total": 0.0033
+		}
+	}
+}

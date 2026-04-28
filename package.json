@@ -3,7 +3,10 @@
 	"version": "0.2.3",
 	"description": "Minimal token usage telemetry for Pi",
 	"type": "module",
-	"exports": "./index.ts",
+	"exports": {
+		".": "./index.ts",
+		"./contracts/turn-usage-v1.json": "./contracts/turn-usage-v1.json"
+	},
 	"author": "drsh4dow <daniel.morettiv@gmail.com> (https://github.com/drsh4dow)",
 	"repository": {
 		"type": "git",
@@ -28,6 +31,7 @@
 		"extension"
 	],
 	"files": [
+		"contracts",
 		"extensions",
 		"index.ts",
 		"README.md"
