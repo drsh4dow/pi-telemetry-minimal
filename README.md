@@ -2,7 +2,7 @@
 
 Passive Pi token telemetry: one finalized assistant turn in, one usage record out.
 
-Writes local JSONL by default. The prescribed way to consume the stream is [`pi-telemetry-web`](https://github.com/drsh4dow/pi-telemetry-web), a self-hosted SQLite dashboard that receives this package's webhook payload. You can still POST the same record to any compatible org webhook.
+Writes local JSONL by default. The prescribed way to consume the stream is [`pi-telemetry-web`](https://codeberg.org/drsh4dow/pi-telemetry-web), a self-hosted SQLite dashboard that receives this package's webhook payload. You can still POST the same record to any compatible org webhook.
 
 It never records prompts, responses, tool output, command text, file contents, or code snippets.
 
@@ -45,7 +45,7 @@ Webhook sink, when configured:
 
 ## Consume with pi-telemetry-web
 
-Run [`pi-telemetry-web`](https://github.com/drsh4dow/pi-telemetry-web), create the first admin user, then copy the generated webhook URL and bearer token from its Settings page into `~/.pi/telemetry-minimal.json`:
+Run [`pi-telemetry-web`](https://codeberg.org/drsh4dow/pi-telemetry-web), create the first admin user, then copy the generated webhook URL and bearer token from its Settings page into `~/.pi/telemetry-minimal.json`:
 
 ```json
 {

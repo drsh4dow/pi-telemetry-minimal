@@ -7,15 +7,15 @@
 		".": "./index.ts",
 		"./contracts/turn-usage-v1.json": "./contracts/turn-usage-v1.json"
 	},
-	"author": "drsh4dow <daniel.morettiv@gmail.com> (https://github.com/drsh4dow)",
+	"author": "drsh4dow <daniel.morettiv@gmail.com> (https://codeberg.org/drsh4dow)",
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/drsh4dow/pi-telemetry-minimal.git"
+		"url": "git+https://codeberg.org/drsh4dow/pi-telemetry-minimal.git"
 	},
 	"bugs": {
-		"url": "https://github.com/drsh4dow/pi-telemetry-minimal/issues"
+		"url": "https://codeberg.org/drsh4dow/pi-telemetry-minimal/issues"
 	},
-	"homepage": "https://github.com/drsh4dow/pi-telemetry-minimal#readme",
+	"homepage": "https://codeberg.org/drsh4dow/pi-telemetry-minimal#readme",
 	"scripts": {
 		"check": "biome check .",
 		"check:fix": "biome check --write .",
